@@ -2,17 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vibration/vibration.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'mqtt_service.dart';
 
 // Modèle d'un message envoyé
 class SentMessage {
-  final String topic;
   final String value;
   final DateTime sentAt;
   final bool retain;
 
   SentMessage({
-    required this.topic,
     required this.value,
     required this.sentAt,
     required this.retain,
@@ -45,18 +44,21 @@ class _HomeScreenState extends State<HomeScreen>
   final _mqttService = MqttService();
   bool _isConnected  = false;
   bool _isConnecting = false;
-  String _statusMessage = 'Non connecté';
-  Color _statusColor = Colors.grey;
+  Color _statusColor = Colors.red;
 
   // Panels
   bool _connexionExpanded = true;
   bool _topicExpanded     = true;
+  bool _messagesExpanded  = false;
+  bool _settingsExpanded  = false;
   bool _retainMessage     = false;
 
+  // Paramètres
+  double _hapticIntensity = 200;   // 0 = désactivé, 1-255
+  bool   _wakelockEnabled = true;
+
   // Messages envoyés
-  bool _messagesExpanded = false;
   final List<SentMessage> _sentMessages = [];
-  final ScrollController _scrollController = ScrollController();
 
   // Animation bouton
   late AnimationController _animController;
@@ -91,16 +93,31 @@ class _HomeScreenState extends State<HomeScreen>
       _topicController.text = prefs.getString('topic') ?? 'maison/top';
       _valueController.text = prefs.getString('value') ?? 'TOP';
       _retainMessage        = prefs.getBool('retain')  ?? false;
+      _hapticIntensity      = prefs.getDouble('haptic') ?? 200;
+      _wakelockEnabled      = prefs.getBool('wakelock') ?? true;
     });
+    _applyWakelock(_wakelockEnabled);
   }
 
   Future<void> _savePreferences() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('ip',    _ipController.text);
-    await prefs.setString('port',  _portController.text);
-    await prefs.setString('topic', _topicController.text);
-    await prefs.setString('value', _valueController.text);
-    await prefs.setBool('retain',  _retainMessage);
+    await prefs.setString('ip',      _ipController.text);
+    await prefs.setString('port',    _portController.text);
+    await prefs.setString('topic',   _topicController.text);
+    await prefs.setString('value',   _valueController.text);
+    await prefs.setBool('retain',    _retainMessage);
+    await prefs.setDouble('haptic',  _hapticIntensity);
+    await prefs.setBool('wakelock',  _wakelockEnabled);
+  }
+
+  // ── Wakelock ──────────────────────────────────────────────
+
+  Future<void> _applyWakelock(bool enabled) async {
+    if (enabled) {
+      await WakelockPlus.enable();
+    } else {
+      await WakelockPlus.disable();
+    }
   }
 
   // ── Connexion ─────────────────────────────────────────────
@@ -110,17 +127,15 @@ class _HomeScreenState extends State<HomeScreen>
       _mqttService.disconnect();
       setState(() {
         _isConnected       = false;
-        _statusMessage     = 'Déconnecté';
-        _statusColor       = Colors.grey;
+        _statusColor       = Colors.red;
         _connexionExpanded = true;
       });
       return;
     }
 
     setState(() {
-      _isConnecting  = true;
-      _statusMessage = 'Connexion en cours...';
-      _statusColor   = Colors.orange;
+      _isConnecting = true;
+      _statusColor  = Colors.orange;
     });
 
     await _savePreferences();
@@ -134,9 +149,6 @@ class _HomeScreenState extends State<HomeScreen>
       _isConnecting      = false;
       _isConnected       = success;
       _connexionExpanded = !success;
-      _statusMessage     = success
-          ? '✅ Connecté à ${_ipController.text}'
-          : '❌ Échec de connexion';
       _statusColor       = success ? Colors.green : Colors.red;
     });
   }
@@ -145,17 +157,19 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _sendMessage() async {
 
-    // Retour haptique
-    if (await Vibration.hasVibrator() ?? false) {
-      Vibration.vibrate(duration: 100, amplitude: 255);
+    // Retour haptique si intensité > 0
+    if (_hapticIntensity > 0) {
+      if (await Vibration.hasVibrator() ?? false) {
+        Vibration.vibrate(
+          duration: 100,
+          amplitude: _hapticIntensity.toInt(),
+        );
+      }
     }
 
-    if (!_isConnected) {
-      _showSnackBar('⚠️ Non connecté au broker !', Colors.orange);
-      return;
-    }
+    if (!_isConnected) return;
 
-    // Envoi immédiat avant toute animation
+    // Envoi immédiat
     final resolvedValue = _mqttService.resolveValue(_valueController.text);
     _mqttService.sendMessage(
       _topicController.text,
@@ -165,19 +179,11 @@ class _HomeScreenState extends State<HomeScreen>
 
     setState(() {
       _sentMessages.insert(0, SentMessage(
-        topic:  _topicController.text,
         value:  resolvedValue,
         sentAt: DateTime.now(),
         retain: _retainMessage,
       ));
     });
-
-    if (!_messagesExpanded) {
-      _showSnackBar(
-        '📤 "$resolvedValue" envoyé sur "${_topicController.text}"',
-        Colors.green,
-      );
-    }
 
     // Animation sans bloquer
     _animController.forward().then((_) => _animController.reverse());
@@ -226,18 +232,6 @@ class _HomeScreenState extends State<HomeScreen>
     setState(() => _sentMessages.clear());
   }
 
-  void _showSnackBar(String message, Color color) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message, style: const TextStyle(fontSize: 14)),
-        backgroundColor: color,
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
-    );
-  }
-
   // ── Build ─────────────────────────────────────────────────
 
   @override
@@ -249,7 +243,7 @@ class _HomeScreenState extends State<HomeScreen>
         appBar: AppBar(
           backgroundColor: const Color(0xFF16213E),
           title: const Text(
-            '📡 MQTT Top Button',
+            '📡 Send on Tap (MQTT)',
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
           ),
           centerTitle: true,
@@ -266,6 +260,7 @@ class _HomeScreenState extends State<HomeScreen>
         ),
         body: Column(
           children: [
+
             // ── Panels haut ──
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
@@ -278,7 +273,7 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
 
-            // ── Zone bouton : prend tout l'espace disponible ──
+            // ── Zone bouton ──
             Expanded(
               child: GestureDetector(
                 onTap: _sendMessage,
@@ -288,19 +283,24 @@ class _HomeScreenState extends State<HomeScreen>
                   child: Container(
                     width: double.infinity,
                     color: Colors.transparent,
-                    child: Center(
-                      child: _buildSendButton(),
-                    ),
+                    child: Center(child: _buildSendButton()),
                   ),
                 ),
               ),
             ),
 
-            // ── Panel Messages : toujours en bas ──
+            // ── Panels bas ──
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-              child: _buildMessagesCard(),
+              child: Column(
+                children: [
+                  _buildMessagesCard(),
+                  const SizedBox(height: 12),
+                  _buildSettingsCard(),
+                ],
+              ),
             ),
+
           ],
         ),
       ),
@@ -324,7 +324,6 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       child: Column(
         children: [
-          // Header cliquable
           GestureDetector(
             onTap: () =>
                 setState(() => _connexionExpanded = !_connexionExpanded),
@@ -336,11 +335,8 @@ class _HomeScreenState extends State<HomeScreen>
                 children: [
                   Row(
                     children: [
-                      const Icon(
-                        Icons.wifi,
-                        color: Color(0xFFE94560),
-                        size: 22,
-                      ),
+                      const Icon(Icons.wifi,
+                          color: Color(0xFFE94560), size: 22),
                       const SizedBox(width: 10),
                       const Text(
                         'Connexion',
@@ -351,7 +347,7 @@ class _HomeScreenState extends State<HomeScreen>
                         ),
                       ),
                       const SizedBox(width: 12),
-                      // Rond statut connexion
+                      // Rond statut
                       AnimatedContainer(
                         duration: const Duration(milliseconds: 300),
                         width: 12,
@@ -360,16 +356,12 @@ class _HomeScreenState extends State<HomeScreen>
                           shape: BoxShape.circle,
                           color: _isConnecting
                               ? Colors.orange
-                              : _isConnected
-                                  ? Colors.green
-                                  : Colors.red,
+                              : _statusColor,
                           boxShadow: [
                             BoxShadow(
                               color: (_isConnecting
                                       ? Colors.orange
-                                      : _isConnected
-                                          ? Colors.green
-                                          : Colors.red)
+                                      : _statusColor)
                                   .withOpacity(0.6),
                               blurRadius: 6,
                               spreadRadius: 1,
@@ -379,22 +371,16 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ],
                   ),
-                  // Flèche animée
                   AnimatedRotation(
                     turns: _connexionExpanded ? 0 : 0.5,
                     duration: const Duration(milliseconds: 300),
-                    child: const Icon(
-                      Icons.keyboard_arrow_up,
-                      color: Color(0xFFE94560),
-                      size: 28,
-                    ),
+                    child: const Icon(Icons.keyboard_arrow_up,
+                        color: Color(0xFFE94560), size: 28),
                   ),
                 ],
               ),
             ),
           ),
-
-          // Contenu animé
           AnimatedCrossFade(
             firstChild: _buildConnexionContent(),
             secondChild: const SizedBox.shrink(),
@@ -431,8 +417,6 @@ class _HomeScreenState extends State<HomeScreen>
             keyboardType: TextInputType.number,
           ),
           const SizedBox(height: 20),
-
-          // Bouton Connexion
           SizedBox(
             width: double.infinity,
             height: 50,
@@ -455,9 +439,7 @@ class _HomeScreenState extends State<HomeScreen>
                         ? 'Déconnecter'
                         : 'Connecter',
                 style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
+                    fontSize: 16, fontWeight: FontWeight.bold),
               ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: _isConnected
@@ -492,7 +474,6 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       child: Column(
         children: [
-          // Header cliquable
           GestureDetector(
             onTap: () =>
                 setState(() => _topicExpanded = !_topicExpanded),
@@ -502,15 +483,12 @@ class _HomeScreenState extends State<HomeScreen>
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
+                  const Row(
                     children: [
-                      const Icon(
-                        Icons.topic,
-                        color: Color(0xFFE94560),
-                        size: 22,
-                      ),
-                      const SizedBox(width: 10),
-                      const Text(
+                      Icon(Icons.topic,
+                          color: Color(0xFFE94560), size: 22),
+                      SizedBox(width: 10),
+                      Text(
                         'Topic & Valeur',
                         style: TextStyle(
                           color: Colors.white,
@@ -520,22 +498,16 @@ class _HomeScreenState extends State<HomeScreen>
                       ),
                     ],
                   ),
-                  // Flèche animée
                   AnimatedRotation(
                     turns: _topicExpanded ? 0 : 0.5,
                     duration: const Duration(milliseconds: 300),
-                    child: const Icon(
-                      Icons.keyboard_arrow_up,
-                      color: Color(0xFFE94560),
-                      size: 28,
-                    ),
+                    child: const Icon(Icons.keyboard_arrow_up,
+                        color: Color(0xFFE94560), size: 28),
                   ),
                 ],
               ),
             ),
           ),
-
-          // Contenu animé
           AnimatedCrossFade(
             firstChild: _buildTopicContent(),
             secondChild: const SizedBox.shrink(),
@@ -581,7 +553,6 @@ class _HomeScreenState extends State<HomeScreen>
             ),
           ),
           const SizedBox(height: 12),
-
           // Option Retain
           Container(
             padding:
@@ -595,18 +566,13 @@ class _HomeScreenState extends State<HomeScreen>
               children: [
                 Row(
                   children: [
-                    const Icon(
-                      Icons.save,
-                      color: Color(0xFFE94560),
-                      size: 20,
-                    ),
+                    const Icon(Icons.save,
+                        color: Color(0xFFE94560), size: 20),
                     const SizedBox(width: 10),
                     Text(
                       'Retain',
                       style: TextStyle(
-                        color: Colors.grey.shade300,
-                        fontSize: 15,
-                      ),
+                          color: Colors.grey.shade300, fontSize: 15),
                     ),
                   ],
                 ),
@@ -689,7 +655,6 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       child: Column(
         children: [
-          // Header cliquable
           GestureDetector(
             onTap: () =>
                 setState(() => _messagesExpanded = !_messagesExpanded),
@@ -701,11 +666,8 @@ class _HomeScreenState extends State<HomeScreen>
                 children: [
                   Row(
                     children: [
-                      const Icon(
-                        Icons.history,
-                        color: Color(0xFFE94560),
-                        size: 22,
-                      ),
+                      const Icon(Icons.history,
+                          color: Color(0xFFE94560), size: 22),
                       const SizedBox(width: 10),
                       const Text(
                         'Messages envoyés',
@@ -716,13 +678,10 @@ class _HomeScreenState extends State<HomeScreen>
                         ),
                       ),
                       const SizedBox(width: 10),
-                      // Badge compteur
                       if (_sentMessages.isNotEmpty)
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 2,
-                          ),
+                              horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
                             color: const Color(0xFFE94560),
                             borderRadius: BorderRadius.circular(12),
@@ -740,7 +699,6 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   Row(
                     children: [
-                      // Icône poubelle
                       if (_sentMessages.isNotEmpty)
                         GestureDetector(
                           onTap: () {
@@ -769,8 +727,7 @@ class _HomeScreenState extends State<HomeScreen>
                                     child: const Text(
                                       'Vider',
                                       style: TextStyle(
-                                        color: Color(0xFFE94560),
-                                      ),
+                                          color: Color(0xFFE94560)),
                                     ),
                                   ),
                                 ],
@@ -779,22 +736,15 @@ class _HomeScreenState extends State<HomeScreen>
                           },
                           child: const Padding(
                             padding: EdgeInsets.only(right: 12),
-                            child: Icon(
-                              Icons.delete_outline,
-                              color: Color(0xFFE94560),
-                              size: 24,
-                            ),
+                            child: Icon(Icons.delete_outline,
+                                color: Color(0xFFE94560), size: 24),
                           ),
                         ),
-                      // Flèche
                       AnimatedRotation(
                         turns: _messagesExpanded ? 0 : 0.5,
                         duration: const Duration(milliseconds: 300),
-                        child: const Icon(
-                          Icons.keyboard_arrow_up,
-                          color: Color(0xFFE94560),
-                          size: 28,
-                        ),
+                        child: const Icon(Icons.keyboard_arrow_up,
+                            color: Color(0xFFE94560), size: 28),
                       ),
                     ],
                   ),
@@ -802,8 +752,6 @@ class _HomeScreenState extends State<HomeScreen>
               ),
             ),
           ),
-
-          // Contenu animé
           AnimatedCrossFade(
             firstChild: _buildMessagesList(),
             secondChild: const SizedBox.shrink(),
@@ -858,7 +806,7 @@ class _HomeScreenState extends State<HomeScreen>
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 8),
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       // Heure
                       Text(
@@ -870,37 +818,21 @@ class _HomeScreenState extends State<HomeScreen>
                         ),
                       ),
                       const SizedBox(width: 10),
-                      // Contenu
+                      // Valeur
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              msg.topic,
-                              style: const TextStyle(
-                                color: Color(0xFFE94560),
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              msg.value,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
+                        child: Text(
+                          msg.value,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                          ),
                         ),
                       ),
                       // Badge retain
                       if (msg.retain)
                         Container(
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
+                              horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
                             color: Colors.orange.withOpacity(0.2),
                             borderRadius: BorderRadius.circular(6),
@@ -920,6 +852,196 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 );
               },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Widget : Carte Paramètres ─────────────────────────────
+
+  Widget _buildSettingsCard() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF16213E),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () =>
+                setState(() => _settingsExpanded = !_settingsExpanded),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.tune,
+                          color: Color(0xFFE94560), size: 22),
+                      SizedBox(width: 10),
+                      Text(
+                        'Paramètres',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  AnimatedRotation(
+                    turns: _settingsExpanded ? 0 : 0.5,
+                    duration: const Duration(milliseconds: 300),
+                    child: const Icon(Icons.keyboard_arrow_up,
+                        color: Color(0xFFE94560), size: 28),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          AnimatedCrossFade(
+            firstChild: _buildSettingsContent(),
+            secondChild: const SizedBox.shrink(),
+            crossFadeState: _settingsExpanded
+                ? CrossFadeState.showFirst
+                : CrossFadeState.showSecond,
+            duration: const Duration(milliseconds: 300),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSettingsContent() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Divider(color: Color(0xFF0F3460), thickness: 1),
+          const SizedBox(height: 16),
+
+          // ── Slider Haptique ──
+          Row(
+            children: [
+              const Icon(Icons.vibration,
+                  color: Color(0xFFE94560), size: 20),
+              const SizedBox(width: 10),
+              Text(
+                'Intensité haptique',
+                style: TextStyle(
+                    color: Colors.grey.shade300, fontSize: 15),
+              ),
+              const Spacer(),
+              // Label valeur
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F3460),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  _hapticIntensity == 0
+                      ? 'OFF'
+                      : '${_hapticIntensity.toInt()}',
+                  style: TextStyle(
+                    color: _hapticIntensity == 0
+                        ? Colors.grey
+                        : const Color(0xFFE94560),
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: _hapticIntensity == 0
+                  ? Colors.grey
+                  : const Color(0xFFE94560),
+              inactiveTrackColor: const Color(0xFF0F3460),
+              thumbColor: _hapticIntensity == 0
+                  ? Colors.grey
+                  : const Color(0xFFE94560),
+              overlayColor:
+                  const Color(0xFFE94560).withOpacity(0.2),
+              trackHeight: 4,
+            ),
+            child: Slider(
+              value: _hapticIntensity,
+              min: 0,
+              max: 255,
+              divisions: 51,  // pas de 5
+              onChanged: (value) {
+                setState(() => _hapticIntensity = value);
+                _savePreferences();
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            child: Text(
+              _hapticIntensity == 0
+                  ? '📴 Vibration désactivée'
+                  : '📳 Vibration activée',
+              style: TextStyle(
+                color: _hapticIntensity == 0
+                    ? Colors.grey.shade600
+                    : Colors.grey.shade500,
+                fontSize: 11,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          // ── Switch Wakelock ──
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F3460),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.screen_lock_portrait,
+                        color: Color(0xFFE94560), size: 20),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Écran toujours allumé',
+                      style: TextStyle(
+                          color: Colors.grey.shade300, fontSize: 15),
+                    ),
+                  ],
+                ),
+                Switch(
+                  value: _wakelockEnabled,
+                  activeColor: const Color(0xFFE94560),
+                  onChanged: (value) {
+                    setState(() => _wakelockEnabled = value);
+                    _applyWakelock(value);
+                    _savePreferences();
+                  },
+                ),
+              ],
             ),
           ),
         ],
@@ -975,7 +1097,6 @@ class _HomeScreenState extends State<HomeScreen>
     _portController.dispose();
     _topicController.dispose();
     _valueController.dispose();
-    _scrollController.dispose();
     _mqttService.disconnect();
     super.dispose();
   }
