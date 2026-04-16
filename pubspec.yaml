@@ -1,0 +1,28 @@
+name: mqtt_top_button
+description: Bouton TOP MQTT
+
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  mqtt_client: ^10.0.0
+  shared_preferences: ^2.2.0
+  wakelock_plus: ^1.1.4
+  vibration: ^2.0.0
+
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.1   # ← AJOUTER
+
+flutter:
+  uses-material-design: true
+
+# ── Config icône ──────────────────
+flutter_launcher_icons:
+  android: true
+  image_path: "assets/icon.png"     # ← ton image
+  min_sdk_android: 21
